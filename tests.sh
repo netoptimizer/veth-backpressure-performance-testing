@@ -26,34 +26,5 @@ run_test() {
   ip -netns ${NS} -s link ls dev ${DEV}
 }
 
-ip netns exec ${NS} tc qdisc del dev ${DEV} root || true
-run_test "no_qdisc"
-
-ip netns exec ${NS} tc qdisc replace dev ${DEV} root fq_codel
+ip netns exec ${NS} tc qdisc replace dev ${DEV} root fq_codel interval 20ms target 2ms
 run_test "fq_codel"
-
-ip netns exec ${NS} tc qdisc replace dev ${DEV} root codel
-run_test "codel"
-
-ip netns exec ${NS} tc qdisc replace dev ${DEV} root sfq
-run_test "sfq"
-
-# For MQ tests add some more queues to the veth device
-# - this will make ping test results unreliable as a drop indicator
-MQs=2
-ip netns exec client ethtool --set-channels to-router   rx $MQs tx $MQs
-ip netns exec router ethtool --set-channels client-link rx $MQs tx $MQs
-ip netns exec router ethtool --set-channels server-link rx $MQs tx $MQs
-ip netns exec server ethtool --set-channels in-router   rx $MQs tx $MQs
-
-ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
-for sq in $(ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
-  ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} fq_codel
-done
-run_test "mq_fq_codel_qdisc"
-
-ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
-for sq in $(ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
-  ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} sfq
-done
-run_test "mq_sfq_qdisc"

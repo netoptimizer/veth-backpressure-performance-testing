@@ -72,6 +72,7 @@ All options except `--verbose` are forwarded to `veth_bql_test.sh`:
 | `--qdisc-replace`   | off     | Test live qdisc replacement under active traffic         |
 | `--tiny-flood`      | off     | Add 2nd UDP thread with min-size packets                 |
 | `--bql-min-limit N` | (none)  | Set DQL limit_min to N                                   |
+| `--gro-disable`     | off     | Disable GRO on veth pair                                 |
 | `--hist`            | off     | Print bpftrace histograms (BQL inflight, NAPI work)      |
 
 ## What It Measures

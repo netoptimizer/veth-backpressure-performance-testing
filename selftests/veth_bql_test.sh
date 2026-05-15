@@ -59,6 +59,7 @@ NORMAL_NAPI=0     # 1 to use normal softirq NAPI (skip threaded NAPI)
 QDISC_REPLACE=0   # 1 to test qdisc replacement under active traffic
 TINY_FLOOD=0      # 1 to add 2nd UDP thread with min-size packets
 BQL_MIN_LIMIT=""   # set DQL limit_min (e.g. 8 for one cache-line of ptr_ring)
+GRO_DISABLE=0     # 1 to disable GRO
 PRINT_HIST=0      # 1 to print bpftrace histograms at end
 BURST_SPEC=""     # burst spec 'N:Mus' e.g. '100:500' = 100 pkts then 500us pause
 TX_USECS=""       # ethtool tx-usecs for BQL completion coalescing (0=per-pkt)
@@ -80,6 +81,7 @@ usage() {
     echo "  --qdisc-replace  test qdisc replacement under active traffic"
     echo "  --tiny-flood     add 2nd UDP thread with min-size packets (stress BQL bytes)"
     echo "  --bql-min-limit N set DQL limit_min to N (e.g. 8 for cache-line ptr_ring)"
+    echo "  --gro-disable    disable GRO on veth pair"
     echo "  --hist           print bpftrace histograms at end"
     echo "  --tx-usecs N     set ethtool tx-usecs for BQL coalescing (0=per-pkt, default=kernel)"
     echo "  --burst N:Mus    bursty traffic: N pkts then M us pause (e.g. '100:500')"
@@ -97,6 +99,7 @@ while [ $# -gt 0 ]; do
     --qdisc-replace) QDISC_REPLACE=1; shift ;;
     --tiny-flood) TINY_FLOOD=1; shift ;;
     --bql-min-limit) BQL_MIN_LIMIT="$2"; shift 2 ;;
+    --gro-disable) GRO_DISABLE=1; shift ;;
     --hist)       PRINT_HIST=1; shift ;;
     --tx-usecs)   TX_USECS="$2"; shift 2 ;;
     --burst)      BURST_SPEC="$2"; shift 2 ;;
@@ -171,9 +174,16 @@ setup_veth() {
     ORIG_WMEM_MAX=$(sysctl -n net.core.wmem_max)
     sysctl -qw net.core.wmem_max=1048576
 
-    # Enable GRO on both ends -- activates NAPI -- BQL code path
-    ethtool -K "$VETH_A" gro on 2>/dev/null || true
-    ip netns exec "$NS" ethtool -K "$VETH_B" gro on 2>/dev/null || true
+    if [ "$GRO_DISABLE" -eq 1 ]; then
+        ethtool -K "$VETH_A" gro off 2>/dev/null || true
+        ip netns exec "$NS" ethtool -K "$VETH_B" gro off 2>/dev/null || true
+        log_info "GRO disabled"
+    else
+        # Enable GRO on both ends -- activates NAPI -- BQL code path
+        ethtool -K "$VETH_A" gro on 2>/dev/null || true
+        ip netns exec "$NS" ethtool -K "$VETH_B" gro on 2>/dev/null || true
+        log_info "GRO enabled"
+    fi
 
     # Disable TSO so veth_skb_is_eligible_for_gro() returns true for all
     # packets, ensuring every SKB takes the NAPI/ptr_ring path.  With TSO

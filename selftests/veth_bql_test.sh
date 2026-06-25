@@ -308,9 +308,10 @@ check_bql_sysfs() {
         BQL_DIR=""
     fi
     if [ -n "$TX_USECS" ] && [ -n "$BQL_DIR" ]; then
-        ip netns exec "$NS" ethtool -C "$VETH_B" tx-usecs "$TX_USECS" 2>/dev/null && \
-            log_info "ethtool tx-usecs set to $TX_USECS on $VETH_B (rx side)" || \
-            log_info "ethtool tx-usecs not supported (kernel missing coalescing patch?)"
+        echo "setting tx usecs"
+        ethtool -C "$VETH_A" tx-usecs "$TX_USECS" 2>/dev/null && \
+            echo "ethtool tx-usecs set to $TX_USECS on $VETH_A (tx side)" || \
+            echo "$? ethtool tx-usecs not supported (kernel missing coalescing patch?)"
     fi
 }
 
@@ -706,6 +707,10 @@ collect_results() {
     if [ -f "$RESULTSDIR"/ping.log ]; then
         PING_LOSS=$(grep -o '[0-9.]*% packet loss' "$RESULTSDIR"/ping.log) &&
             log_info "Ping loss: $PING_LOSS"
+        PING_LOSS_PCT=$(echo "$PING_LOSS" | grep -oP '[0-9.]+' | head -1)
+        if [ -n "$PING_LOSS_PCT" ] && [ "$(echo "$PING_LOSS_PCT > 0" | bc -l)" -eq 1 ]; then
+            log_info "WARNING: ping had $PING_LOSS_PCT% packet loss (expected 0%)"
+        fi
         PING_STATS=$(grep -oP 'time=\K[0-9.]+' "$RESULTSDIR"/ping.log | \
             sort -n | awk '{a[NR]=$1; sum+=$1}
                  END {if(NR>0) {idx=int(NR*0.99); if(idx<1) idx=1;
@@ -901,6 +906,10 @@ test_ping() {
     if [ -f "$RESULTSDIR"/ping.log ]; then
         PING_LOSS=$(grep -o '[0-9.]*% packet loss' "$RESULTSDIR"/ping.log) &&
             log_info "Ping loss: $PING_LOSS"
+        PING_LOSS_PCT=$(echo "$PING_LOSS" | grep -oP '[0-9.]+' | head -1)
+        if [ -n "$PING_LOSS_PCT" ] && [ "$(echo "$PING_LOSS_PCT > 0" | bc -l)" -eq 1 ]; then
+            log_info "WARNING: ping had $PING_LOSS_PCT% packet loss (expected 0%)"
+        fi
         PING_STATS=$(grep -oP 'time=\K[0-9.]+' "$RESULTSDIR"/ping.log | \
             sort -n | awk '{a[NR]=$1; sum+=$1}
                  END {if(NR>0) {idx=int(NR*0.99); if(idx<1) idx=1;

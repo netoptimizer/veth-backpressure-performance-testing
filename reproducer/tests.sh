@@ -335,6 +335,15 @@ if should_run mq_fq_codel_qdisc || should_run mq_sfq_qdisc; then
   $SUDO ip netns exec router ethtool --set-channels client-link rx $MQs tx $MQs
   $SUDO ip netns exec router ethtool --set-channels server-link rx $MQs tx $MQs
   $SUDO ip netns exec server ethtool --set-channels in-router   rx $MQs tx $MQs
+
+  # Use XPS to steer all TX traffic on server-link to queue 1 (not queue 0).
+  # This deterministically triggers the veth txq-wake bug: veth_poll() for
+  # queue 1 incorrectly wakes peer TX queue 0, so queue 1 stays stopped forever.
+  # get_xps_queue() runs before the flow-hash fallback in netdev_pick_tx().
+  $SUDO ip netns exec ${NS} bash -c '
+    echo 0 > /sys/class/net/'"${DEV}"'/queues/tx-0/xps_cpus
+    printf "%x" $(( (1 << $(nproc)) - 1 )) > /sys/class/net/'"${DEV}"'/queues/tx-1/xps_cpus
+  '
 fi
 
 if should_run mq_fq_codel_qdisc; then

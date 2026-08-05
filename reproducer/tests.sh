@@ -188,6 +188,7 @@ else:
 }
 
 run_test() {
+  FAIL=0
   output=$1
   echo -e "\n=== $output === (runs for $TIME sec)"
 
@@ -203,7 +204,7 @@ run_test() {
   # Run bbperf elephant flow
   $SUDO ip netns exec client bbperf -t $TIME -u -c $SERVER_IP -B $CLIENT_IP \
             -g --graph-file "${RESULTS_DIR}/bbperf-graph-${output}.png" \
-            -J "${RESULTS_DIR}/${output}.json"
+            -J "${RESULTS_DIR}/${output}.json" || { echo "Queue stalled?"; FAIL=1; }
 
   # Stop ping (it has a longer deadline to cover bbperf calibration)
   $SUDO kill -INT "$PING_PID" 2>/dev/null || true
@@ -218,6 +219,10 @@ run_test() {
   $SUDO ip netns exec ${NS} tc -s qdisc ls dev ${DEV}
   # Interface stats: Look for TX dropped
   $SUDO ip -netns ${NS} -s link ls dev ${DEV}
+
+  if [[ "$FAIL" -eq 1 ]];then
+      exit 1
+  fi
 
   # Generate combined graph with ping overlay
   "${SCRIPT_DIR}/plot_combined.sh" \

@@ -11,6 +11,9 @@ SUDO=""
 #MQ=yes
 MQ=no
 
+REPRODUCE_QUEUE_INDEX_BUG=no
+#REPRODUCE_QUEUE_INDEX_BUG=yes
+
 # recreate namespaces
 $SUDO ip netns del server || true
 $SUDO ip netns del client || true
@@ -21,8 +24,41 @@ $SUDO ip netns add router
 
 # setup routing between netns namespaces
 if [[ "${MQ}" == "yes" ]]; then
-  $SUDO ip -netns client link add dev to-router type veth peer name client-link netns router numtxqueues 8 numrxqueues 8
-  $SUDO ip -netns server link add dev in-router type veth peer name server-link netns router numtxqueues 8 numrxqueues 8
+  # numtxqueues/numrxqueues MUST come before `type veth`; after `peer` they land in
+  # the peer nest and get dropped -> both ends come up with 1 queue
+  $SUDO ip -netns client link add dev to-router numtxqueues 8 numrxqueues 8 \
+      type veth peer name client-link netns router
+  $SUDO ip -netns server link add dev in-router numtxqueues 8 numrxqueues 8 \
+      type veth peer name server-link netns router
+
+  # veth is IFF_NO_QUEUE -> default qdisc is noqueue, not mq. Attach it explicitly.
+  $SUDO ip netns exec router tc qdisc replace dev client-link root mq
+  $SUDO ip netns exec router tc qdisc replace dev server-link root mq
+
+  if [[ "${REPRODUCE_QUEUE_INDEX_BUG}" == "yes" ]]; then
+      TARGET=1
+      # glob, redirects and -e tests all have to evaluate INSIDE the netns,
+      # so run the whole block there instead of prefixing each command
+      $SUDO ip netns exec router bash -s server-link "$TARGET" <<'EOS'
+set -euo pipefail
+DEV=$1; TARGET=$2
+Q=/sys/class/net/$DEV/queues
+
+mask=$(sed 's/[0-9a-f]/f/g' "$Q/tx-0/xps_cpus")
+
+for q in "$Q"/tx-*; do
+    idx=${q##*tx-}
+    if [ "$idx" = "$TARGET" ]; then
+        printf '%s\n' "$mask" > "$q/xps_cpus"
+    else
+        printf '0\n' > "$q/xps_cpus"
+    fi
+    if [ -e "$q/xps_rxqs" ]; then           # see caveat 2
+        printf '0\n' > "$q/xps_rxqs"
+    fi
+done
+EOS
+  fi
 else
   $SUDO ip -netns client link add dev to-router type veth peer name client-link netns router
   $SUDO ip -netns server link add dev in-router type veth peer name server-link netns router

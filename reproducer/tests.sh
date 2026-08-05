@@ -11,14 +11,30 @@ SUDO=""
 
 # Defaults
 TIME=60
+RUN_TESTS=""  # empty = run all
+
+# All available test names (comma-separated, in order)
+ALL_TESTS="no_qdisc,fq_codel,codel,sfq,mq_fq_codel_qdisc,mq_sfq_qdisc"
 
 # Parse command line options
 while [ $# -gt 0 ]; do
   case "$1" in
     --duration) TIME="$2"; shift 2 ;;
-    *) echo "Unknown option: $1" >&2; echo "Usage: $0 [--duration SEC]" >&2; exit 1 ;;
+    --tests) RUN_TESTS="$2"; shift 2 ;;
+    --list) echo "$ALL_TESTS" | tr ',' '\n'; exit 0 ;;
+    *) echo "Usage: $0 [--duration SEC] [--tests TEST[,TEST,...]] [--list]" >&2
+       echo "  --tests: comma-separated list of tests (default: all)" >&2
+       echo "  --list:  list available test names and exit" >&2
+       exit 1 ;;
   esac
 done
+
+# Check if a test should run
+should_run() {
+  local test="$1"
+  [ -z "$RUN_TESTS" ] && return 0  # empty = run all
+  echo ",$RUN_TESTS," | grep -q ",$test,"
+}
 
 DEV=server-link
 NS=router
@@ -281,37 +297,61 @@ run_test() {
   fi
 }
 
-$SUDO ip netns exec ${NS} tc qdisc del dev ${DEV} root 2>/dev/null || true
-run_test "no_qdisc"
+# Ensure single-queue tests run with 1 channel (MQ setup from a previous
+# invocation persists in the netns until setup.sh is re-run).
+if should_run no_qdisc || should_run fq_codel || should_run codel || should_run sfq; then
+  $SUDO ip netns exec client ethtool --set-channels to-router   rx 1 tx 1
+  $SUDO ip netns exec router ethtool --set-channels client-link rx 1 tx 1
+  $SUDO ip netns exec router ethtool --set-channels server-link rx 1 tx 1
+  $SUDO ip netns exec server ethtool --set-channels in-router   rx 1 tx 1
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root fq_codel
-run_test "fq_codel"
+if should_run no_qdisc; then
+  $SUDO ip netns exec ${NS} tc qdisc del dev ${DEV} root 2>/dev/null || true
+  run_test "no_qdisc"
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root codel
-run_test "codel"
+if should_run fq_codel; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root fq_codel
+  run_test "fq_codel"
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root sfq
-run_test "sfq"
+if should_run codel; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root codel
+  run_test "codel"
+fi
 
-# For MQ tests add some more queues to the veth device
-# - this will make ping test results unreliable as a drop indicator
-MQs=2
-$SUDO ip netns exec client ethtool --set-channels to-router   rx $MQs tx $MQs
-$SUDO ip netns exec router ethtool --set-channels client-link rx $MQs tx $MQs
-$SUDO ip netns exec router ethtool --set-channels server-link rx $MQs tx $MQs
-$SUDO ip netns exec server ethtool --set-channels in-router   rx $MQs tx $MQs
+if should_run sfq; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root sfq
+  run_test "sfq"
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
-for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
-  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} fq_codel
-done
-run_test "mq_fq_codel_qdisc"
+# MQ setup: only needed if any MQ test is selected
+if should_run mq_fq_codel_qdisc || should_run mq_sfq_qdisc; then
+  # For MQ tests add some more queues to the veth device
+  # - this will make ping test results unreliable as a drop indicator
+  MQs=2
+  $SUDO ip netns exec client ethtool --set-channels to-router   rx $MQs tx $MQs
+  $SUDO ip netns exec router ethtool --set-channels client-link rx $MQs tx $MQs
+  $SUDO ip netns exec router ethtool --set-channels server-link rx $MQs tx $MQs
+  $SUDO ip netns exec server ethtool --set-channels in-router   rx $MQs tx $MQs
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
-for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
-  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} sfq
-done
-run_test "mq_sfq_qdisc"
+if should_run mq_fq_codel_qdisc; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
+  for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
+    $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} fq_codel
+  done
+  run_test "mq_fq_codel_qdisc"
+fi
+
+if should_run mq_sfq_qdisc; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
+  for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
+    $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} sfq
+  done
+  run_test "mq_sfq_qdisc"
+fi
 
 # --- Summary table ---
 # Print a single, consistently-formatted table to both stdout and summary.txt.

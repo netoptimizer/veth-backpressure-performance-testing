@@ -11,14 +11,30 @@ SUDO=""
 
 # Defaults
 TIME=60
+RUN_TESTS=""  # empty = run all
+
+# All available test names (comma-separated, in order)
+ALL_TESTS="no_qdisc,fq_codel,codel,sfq,mq_fq_codel_qdisc,mq_sfq_qdisc"
 
 # Parse command line options
 while [ $# -gt 0 ]; do
   case "$1" in
     --duration) TIME="$2"; shift 2 ;;
-    *) echo "Unknown option: $1" >&2; echo "Usage: $0 [--duration SEC]" >&2; exit 1 ;;
+    --tests) RUN_TESTS="$2"; shift 2 ;;
+    --list) echo "$ALL_TESTS" | tr ',' '\n'; exit 0 ;;
+    *) echo "Usage: $0 [--duration SEC] [--tests TEST[,TEST,...]] [--list]" >&2
+       echo "  --tests: comma-separated list of tests (default: all)" >&2
+       echo "  --list:  list available test names and exit" >&2
+       exit 1 ;;
   esac
 done
+
+# Check if a test should run
+should_run() {
+  local test="$1"
+  [ -z "$RUN_TESTS" ] && return 0  # empty = run all
+  echo ",$RUN_TESTS," | grep -q ",$test,"
+}
 
 DEV=server-link
 NS=router
@@ -133,6 +149,7 @@ declare -a PING_MAXS=()
 declare -a PING_LOSSES=()
 declare -a BBPERF_AVGS=()
 declare -a BBPERF_P99S=()
+declare -a TEST_STATUSES=()
 
 parse_ping_stats() {
   local logfile="$1"
@@ -200,10 +217,20 @@ run_test() {
      > "$ping_log" 2>&1)&
   PING_PID=$!
 
-  # Run bbperf elephant flow
+  # Run bbperf elephant flow; capture exit code instead of aborting on failure.
+  # bbperf can time out when a TX queue is permanently stuck (the veth txq-wake
+  # bug causes its TCP control connection to hang if it lands on a stopped queue).
+  local bbperf_rc=0
+  local bbperf_log="${RESULTS_DIR}/bbperf-${output}.log"
   $SUDO ip netns exec client bbperf -t $TIME -u -c $SERVER_IP -B $CLIENT_IP \
             -g --graph-file "${RESULTS_DIR}/bbperf-graph-${output}.png" \
-            -J "${RESULTS_DIR}/${output}.json"
+            -J "${RESULTS_DIR}/${output}.json" \
+    2>"$bbperf_log" || bbperf_rc=$?
+
+  if [ $bbperf_rc -ne 0 ]; then
+    echo "*** bbperf FAILED (exit code $bbperf_rc) -- possible stuck txq ***"
+    echo "    (see $bbperf_log for details)"
+  fi
 
   # Stop ping (it has a longer deadline to cover bbperf calibration)
   $SUDO kill -INT "$PING_PID" 2>/dev/null || true
@@ -219,22 +246,30 @@ run_test() {
   # Interface stats: Look for TX dropped
   $SUDO ip -netns ${NS} -s link ls dev ${DEV}
 
-  # Generate combined graph with ping overlay
-  "${SCRIPT_DIR}/plot_combined.sh" \
-    "${RESULTS_DIR}/${output}.json" \
-    "$ping_log" \
-    "${RESULTS_DIR}/combined-${output}.png" \
-    "${output} (elephant UDP + ping RTT)" || true
+  # Generate graphs (skip if bbperf failed -- JSON may be empty/corrupt)
+  if [ $bbperf_rc -eq 0 ]; then
+    # Generate combined graph with ping overlay
+    "${SCRIPT_DIR}/plot_combined.sh" \
+      "${RESULTS_DIR}/${output}.json" \
+      "$ping_log" \
+      "${RESULTS_DIR}/combined-${output}.png" \
+      "${output} (elephant UDP + ping RTT)" || true
 
-  # Generate bbperf-style multi-panel graph with ping overlay
-  "${SCRIPT_DIR}/plot_multi.sh" \
-    "${RESULTS_DIR}/${output}.json" \
-    "$ping_log" \
-    "${RESULTS_DIR}/multi-${output}.png" \
-    "${output}" || true
+    # Generate bbperf-style multi-panel graph with ping overlay
+    "${SCRIPT_DIR}/plot_multi.sh" \
+      "${RESULTS_DIR}/${output}.json" \
+      "$ping_log" \
+      "${RESULTS_DIR}/multi-${output}.png" \
+      "${output}" || true
+  fi
 
   # Collect stats for summary table
   TEST_NAMES+=("$output")
+  if [ $bbperf_rc -eq 0 ]; then
+    TEST_STATUSES+=("OK")
+  else
+    TEST_STATUSES+=("FAIL")
+  fi
   local pstats
   pstats=$(parse_ping_stats "$ping_log" "$WARMUP")
   PING_AVGS+=($(echo "$pstats" | awk '{print $1}'))
@@ -242,55 +277,104 @@ run_test() {
   PING_MAXS+=($(echo "$pstats" | awk '{print $3}'))
   PING_LOSSES+=($(echo "$pstats" | awk '{print $4}'))
   local bstats
-  bstats=$(parse_bbperf_stats "${RESULTS_DIR}/${output}.json")
+  if [ $bbperf_rc -eq 0 ]; then
+    bstats=$(parse_bbperf_stats "${RESULTS_DIR}/${output}.json")
+  else
+    bstats="- -"
+  fi
   BBPERF_AVGS+=($(echo "$bstats" | awk '{print $1}'))
   BBPERF_P99S+=($(echo "$bstats" | awk '{print $2}'))
+
+  # Restart bbperf server if it died (needed for subsequent tests)
+  if [ $bbperf_rc -ne 0 ] && [ "$OWN_SERVER" = true ]; then
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "Restarting bbperf server..."
+      $SUDO ip netns exec server bbperf -s -B $SERVER_IP \
+        > "${RESULTS_DIR}/server.log" 2>&1 &
+      SERVER_PID=$!
+      sleep 0.5
+    fi
+  fi
 }
 
-$SUDO ip netns exec ${NS} tc qdisc del dev ${DEV} root 2>/dev/null || true
-run_test "no_qdisc"
+# Ensure single-queue tests run with 1 channel (MQ setup from a previous
+# invocation persists in the netns until setup.sh is re-run).
+if should_run no_qdisc || should_run fq_codel || should_run codel || should_run sfq; then
+  $SUDO ip netns exec client ethtool --set-channels to-router   rx 1 tx 1
+  $SUDO ip netns exec router ethtool --set-channels client-link rx 1 tx 1
+  $SUDO ip netns exec router ethtool --set-channels server-link rx 1 tx 1
+  $SUDO ip netns exec server ethtool --set-channels in-router   rx 1 tx 1
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root fq_codel
-run_test "fq_codel"
+if should_run no_qdisc; then
+  $SUDO ip netns exec ${NS} tc qdisc del dev ${DEV} root 2>/dev/null || true
+  run_test "no_qdisc"
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root codel
-run_test "codel"
+if should_run fq_codel; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root fq_codel
+  run_test "fq_codel"
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root sfq
-run_test "sfq"
+if should_run codel; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root codel
+  run_test "codel"
+fi
 
-# For MQ tests add some more queues to the veth device
-# - this will make ping test results unreliable as a drop indicator
-MQs=2
-$SUDO ip netns exec client ethtool --set-channels to-router   rx $MQs tx $MQs
-$SUDO ip netns exec router ethtool --set-channels client-link rx $MQs tx $MQs
-$SUDO ip netns exec router ethtool --set-channels server-link rx $MQs tx $MQs
-$SUDO ip netns exec server ethtool --set-channels in-router   rx $MQs tx $MQs
+if should_run sfq; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root sfq
+  run_test "sfq"
+fi
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
-for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
-  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} fq_codel
-done
-run_test "mq_fq_codel_qdisc"
+# MQ setup: only needed if any MQ test is selected
+if should_run mq_fq_codel_qdisc || should_run mq_sfq_qdisc; then
+  # For MQ tests add some more queues to the veth device
+  # - this will make ping test results unreliable as a drop indicator
+  MQs=2
+  $SUDO ip netns exec client ethtool --set-channels to-router   rx $MQs tx $MQs
+  $SUDO ip netns exec router ethtool --set-channels client-link rx $MQs tx $MQs
+  $SUDO ip netns exec router ethtool --set-channels server-link rx $MQs tx $MQs
+  $SUDO ip netns exec server ethtool --set-channels in-router   rx $MQs tx $MQs
 
-$SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
-for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
-  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} sfq
-done
-run_test "mq_sfq_qdisc"
+  # Use XPS to steer all TX traffic on server-link to queue 1 (not queue 0).
+  # This deterministically triggers the veth txq-wake bug: veth_poll() for
+  # queue 1 incorrectly wakes peer TX queue 0, so queue 1 stays stopped forever.
+  # get_xps_queue() runs before the flow-hash fallback in netdev_pick_tx().
+  $SUDO ip netns exec ${NS} bash -c '
+    echo 0 > /sys/class/net/'"${DEV}"'/queues/tx-0/xps_cpus
+    printf "%x" $(( (1 << $(nproc)) - 1 )) > /sys/class/net/'"${DEV}"'/queues/tx-1/xps_cpus
+  '
+fi
+
+if should_run mq_fq_codel_qdisc; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
+  for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
+    $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} fq_codel
+  done
+  run_test "mq_fq_codel_qdisc"
+fi
+
+if should_run mq_sfq_qdisc; then
+  $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} root handle 1: mq
+  for sq in $($SUDO ip netns exec ${NS} tc -j qdisc show dev ${DEV} | jq -r .[].parent | grep -v null); do
+    $SUDO ip netns exec ${NS} tc qdisc replace dev ${DEV} parent ${sq} sfq
+  done
+  run_test "mq_sfq_qdisc"
+fi
 
 # --- Summary table ---
 # Print a single, consistently-formatted table to both stdout and summary.txt.
 # Build each value with its unit suffix first, then use a single %Ns column
 # width so headers and data align in monospace output.
 print_summary() {
-  printf "%-22s %10s %10s %10s %10s  %12s %12s\n" \
-         "qdisc" "ping_avg" "ping_p99" "ping_max" "ping_loss" "bbperf_avg" "bbperf_p99"
-  printf "%-22s %10s %10s %10s %10s  %12s %12s\n" \
-         "-----" "--------" "--------" "--------" "---------" "----------" "----------"
+  printf "%-22s %6s %10s %10s %10s %10s  %12s %12s\n" \
+         "qdisc" "status" "ping_avg" "ping_p99" "ping_max" "ping_loss" "bbperf_avg" "bbperf_p99"
+  printf "%-22s %6s %10s %10s %10s %10s  %12s %12s\n" \
+         "-----" "------" "--------" "--------" "--------" "---------" "----------" "----------"
   for i in "${!TEST_NAMES[@]}"; do
-    printf "%-22s %10s %10s %10s %10s  %12s %12s\n" \
+    printf "%-22s %6s %10s %10s %10s %10s  %12s %12s\n" \
       "${TEST_NAMES[$i]}" \
+      "${TEST_STATUSES[$i]}" \
       "${PING_AVGS[$i]}ms" "${PING_P99S[$i]}ms" "${PING_MAXS[$i]}ms" \
       "${PING_LOSSES[$i]}%" \
       "${BBPERF_AVGS[$i]}ms" "${BBPERF_P99S[$i]}ms"

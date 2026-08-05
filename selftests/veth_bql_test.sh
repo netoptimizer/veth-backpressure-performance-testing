@@ -68,6 +68,7 @@ GRO_NORMAL_BATCH="" # override /proc/sys/net/core/gro_normal_batch
 USE_PKTGEN=0      # 1 to use kernel pktgen instead of udp_flood
 PKTGEN_SIZE=64    # pktgen packet size (default 64 for max pps)
 PKTGEN_THREADS=1  # number of pktgen kernel threads
+MQ_QUEUES=2       # multi-queue: number of TX/RX channels (0=single-queue)
 VETH_A="veth_bql0"
 VETH_B="veth_bql1"
 IP_A="10.99.0.1"
@@ -95,6 +96,8 @@ usage() {
     echo "  --pktgen         use kernel pktgen instead of udp_flood (kernel-space TX)"
     echo "  --pktgen-size N  pktgen packet size in bytes (default: $PKTGEN_SIZE)"
     echo "  --pktgen-threads N pktgen kernel threads (default: $PKTGEN_THREADS)"
+    echo "  --single-queue   use single TX queue (skip MQ+XPS, default: MQ=$MQ_QUEUES)"
+    echo "  --mq-queues N    set number of TX/RX channels (default: $MQ_QUEUES)"
     exit 1
 }
 
@@ -118,10 +121,19 @@ while [ $# -gt 0 ]; do
     --pktgen)     USE_PKTGEN=1; shift ;;
     --pktgen-size)  PKTGEN_SIZE="$2"; shift 2 ;;
     --pktgen-threads) PKTGEN_THREADS="$2"; shift 2 ;;
+    --single-queue) MQ_QUEUES=0; shift ;;
+    --mq-queues)  MQ_QUEUES="$2"; shift 2 ;;
     --help|-h)    usage ;;
     *)            echo "Unknown option: $1" >&2; usage ;;
     esac
 done
+
+# Derive active TX queue index from MQ setting
+if [ "$MQ_QUEUES" -gt 0 ]; then
+    MQ_TXQ=1
+else
+    MQ_TXQ=0
+fi
 
 # Results directory: use RESULTSDIR from env (set by virtme wrapper) or create one.
 if [ -z "$RESULTSDIR" ]; then
@@ -230,6 +242,26 @@ setup_veth() {
     else
         log_info "Using normal softirq NAPI (threaded NAPI disabled)"
     fi
+
+    # Multi-queue setup: activate MQ_QUEUES channels and use XPS to steer
+    # all traffic to TX queue 1.  This deterministically triggers the veth
+    # txq-wake bug (dc82a33297fc): veth_poll() for queue 1 incorrectly
+    # wakes peer TX queue 0, so queue 1 stays stopped forever.
+    # get_xps_queue() in netdev_pick_tx() runs before the flow-hash
+    # fallback, making the steering deterministic.
+    if [ "$MQ_QUEUES" -gt 0 ]; then
+        ethtool --set-channels "$VETH_A" rx "$MQ_QUEUES" tx "$MQ_QUEUES" || \
+            { log_info "WARNING: failed to set $MQ_QUEUES channels on $VETH_A"; }
+        ip netns exec "$NS" ethtool --set-channels "$VETH_B" rx "$MQ_QUEUES" tx "$MQ_QUEUES" || \
+            { log_info "WARNING: failed to set $MQ_QUEUES channels on $VETH_B"; }
+
+        # XPS: clear queue 0, map all CPUs to queue 1
+        local cpu_mask
+        cpu_mask=$(printf "%x" $(( (1 << $(nproc)) - 1 )))
+        echo 0 > /sys/class/net/"$VETH_A"/queues/tx-0/xps_cpus
+        echo "$cpu_mask" > /sys/class/net/"$VETH_A"/queues/tx-1/xps_cpus
+        log_info "MQ enabled: $MQ_QUEUES channels, XPS steering to tx-${MQ_TXQ}"
+    fi
 }
 
 install_qdisc() {
@@ -293,7 +325,7 @@ verify_iptables_hit() {
 }
 
 check_bql_sysfs() {
-    BQL_DIR="/sys/class/net/${VETH_A}/queues/tx-0/byte_queue_limits"
+    BQL_DIR="/sys/class/net/${VETH_A}/queues/tx-${MQ_TXQ}/byte_queue_limits"
     if [ -d "$BQL_DIR" ]; then
         log_info "BQL sysfs found: $BQL_DIR"
         if [ "$BQL_DISABLE" -eq 1 ]; then
@@ -550,7 +582,7 @@ print_periodic_stats() {
     local elapsed="$1"
 
     # BQL stats and watchdog counter
-    WD_CNT=$(cat /sys/class/net/${VETH_A}/queues/tx-0/tx_timeout \
+    WD_CNT=$(cat /sys/class/net/${VETH_A}/queues/tx-${MQ_TXQ}/tx_timeout \
         2>/dev/null) || WD_CNT="?"
     if [ -n "$BQL_DIR" ] && [ -d "$BQL_DIR" ]; then
         INFLIGHT=$(cat "$BQL_DIR/inflight" 2>/dev/null || echo "?")
@@ -714,7 +746,7 @@ collect_results() {
     fi
 
     # Watchdog summary
-    WD_FINAL=$(cat /sys/class/net/${VETH_A}/queues/tx-0/tx_timeout \
+    WD_FINAL=$(cat /sys/class/net/${VETH_A}/queues/tx-${MQ_TXQ}/tx_timeout \
         2>/dev/null) || WD_FINAL=0
     if [ "$WD_FINAL" -gt 0 ] 2>/dev/null; then
         log_info "Watchdog fired ${WD_FINAL} time(s)"
@@ -778,6 +810,25 @@ collect_results() {
                 cat "$pgdev_file" >> "$RESULTSDIR/pktgen.log" 2>/dev/null || true
             fi
         done
+    fi
+
+    # Detect traffic stall: if goodput is near zero while flood was running,
+    # the TX queue is likely stuck (veth txq-wake bug).  Skip this check in
+    # ping-only mode where no flood traffic is expected.
+    #
+    # Characteristic pattern of the stuck-queue bug:
+    #   - goodput near zero (queue stopped, no packets delivered)
+    #   - requeues = 1 (queue stopped once, never restarted)
+    #   - drops growing (new packets enqueued but dropped at qdisc limit)
+    #   - pkts constant (no new packets dequeued/transmitted)
+    if [ "$PING_ONLY" -eq 0 ] && [ "$goodput_pps" -lt 100 ]; then
+        local requeues
+        requeues=$(tc -j -s qdisc show dev "$VETH_A" root 2>/dev/null | \
+            jq -r '.[0].requeues // 0' 2>/dev/null) || requeues="?"
+        RET=$ksft_fail
+        retmsg="traffic stall: goodput=${goodput_pps} pps,"
+        retmsg+=" drops=${qdisc_drops}, requeues=${requeues} (TX queue stuck?)"
+        log_info "FAIL: $retmsg"
     fi
 
     # Final dmesg check -- only upgrade to fail, never override existing fail
@@ -859,7 +910,7 @@ test_qdisc_replace() {
         cur_qdisc=$(tc qdisc show dev "$VETH_A" root 2>/dev/null | \
             awk '{print $2}') || cur_qdisc="none"
         local txq_state
-        txq_state=$(cat /sys/class/net/${VETH_A}/queues/tx-0/tx_timeout \
+        txq_state=$(cat /sys/class/net/${VETH_A}/queues/tx-${MQ_TXQ}/tx_timeout \
             2>/dev/null) || txq_state="?"
         echo "  [${elapsed}s] qdisc=${cur_qdisc} watchdog=${txq_state}"
 

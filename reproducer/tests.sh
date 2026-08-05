@@ -133,6 +133,7 @@ declare -a PING_MAXS=()
 declare -a PING_LOSSES=()
 declare -a BBPERF_AVGS=()
 declare -a BBPERF_P99S=()
+declare -a TEST_STATUSES=()
 
 parse_ping_stats() {
   local logfile="$1"
@@ -200,10 +201,20 @@ run_test() {
      > "$ping_log" 2>&1)&
   PING_PID=$!
 
-  # Run bbperf elephant flow
+  # Run bbperf elephant flow; capture exit code instead of aborting on failure.
+  # bbperf can time out when a TX queue is permanently stuck (the veth txq-wake
+  # bug causes its TCP control connection to hang if it lands on a stopped queue).
+  local bbperf_rc=0
+  local bbperf_log="${RESULTS_DIR}/bbperf-${output}.log"
   $SUDO ip netns exec client bbperf -t $TIME -u -c $SERVER_IP -B $CLIENT_IP \
             -g --graph-file "${RESULTS_DIR}/bbperf-graph-${output}.png" \
-            -J "${RESULTS_DIR}/${output}.json"
+            -J "${RESULTS_DIR}/${output}.json" \
+    2>"$bbperf_log" || bbperf_rc=$?
+
+  if [ $bbperf_rc -ne 0 ]; then
+    echo "*** bbperf FAILED (exit code $bbperf_rc) -- possible stuck txq ***"
+    echo "    (see $bbperf_log for details)"
+  fi
 
   # Stop ping (it has a longer deadline to cover bbperf calibration)
   $SUDO kill -INT "$PING_PID" 2>/dev/null || true
@@ -219,22 +230,30 @@ run_test() {
   # Interface stats: Look for TX dropped
   $SUDO ip -netns ${NS} -s link ls dev ${DEV}
 
-  # Generate combined graph with ping overlay
-  "${SCRIPT_DIR}/plot_combined.sh" \
-    "${RESULTS_DIR}/${output}.json" \
-    "$ping_log" \
-    "${RESULTS_DIR}/combined-${output}.png" \
-    "${output} (elephant UDP + ping RTT)" || true
+  # Generate graphs (skip if bbperf failed -- JSON may be empty/corrupt)
+  if [ $bbperf_rc -eq 0 ]; then
+    # Generate combined graph with ping overlay
+    "${SCRIPT_DIR}/plot_combined.sh" \
+      "${RESULTS_DIR}/${output}.json" \
+      "$ping_log" \
+      "${RESULTS_DIR}/combined-${output}.png" \
+      "${output} (elephant UDP + ping RTT)" || true
 
-  # Generate bbperf-style multi-panel graph with ping overlay
-  "${SCRIPT_DIR}/plot_multi.sh" \
-    "${RESULTS_DIR}/${output}.json" \
-    "$ping_log" \
-    "${RESULTS_DIR}/multi-${output}.png" \
-    "${output}" || true
+    # Generate bbperf-style multi-panel graph with ping overlay
+    "${SCRIPT_DIR}/plot_multi.sh" \
+      "${RESULTS_DIR}/${output}.json" \
+      "$ping_log" \
+      "${RESULTS_DIR}/multi-${output}.png" \
+      "${output}" || true
+  fi
 
   # Collect stats for summary table
   TEST_NAMES+=("$output")
+  if [ $bbperf_rc -eq 0 ]; then
+    TEST_STATUSES+=("OK")
+  else
+    TEST_STATUSES+=("FAIL")
+  fi
   local pstats
   pstats=$(parse_ping_stats "$ping_log" "$WARMUP")
   PING_AVGS+=($(echo "$pstats" | awk '{print $1}'))
@@ -242,9 +261,24 @@ run_test() {
   PING_MAXS+=($(echo "$pstats" | awk '{print $3}'))
   PING_LOSSES+=($(echo "$pstats" | awk '{print $4}'))
   local bstats
-  bstats=$(parse_bbperf_stats "${RESULTS_DIR}/${output}.json")
+  if [ $bbperf_rc -eq 0 ]; then
+    bstats=$(parse_bbperf_stats "${RESULTS_DIR}/${output}.json")
+  else
+    bstats="- -"
+  fi
   BBPERF_AVGS+=($(echo "$bstats" | awk '{print $1}'))
   BBPERF_P99S+=($(echo "$bstats" | awk '{print $2}'))
+
+  # Restart bbperf server if it died (needed for subsequent tests)
+  if [ $bbperf_rc -ne 0 ] && [ "$OWN_SERVER" = true ]; then
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "Restarting bbperf server..."
+      $SUDO ip netns exec server bbperf -s -B $SERVER_IP \
+        > "${RESULTS_DIR}/server.log" 2>&1 &
+      SERVER_PID=$!
+      sleep 0.5
+    fi
+  fi
 }
 
 $SUDO ip netns exec ${NS} tc qdisc del dev ${DEV} root 2>/dev/null || true
@@ -284,13 +318,14 @@ run_test "mq_sfq_qdisc"
 # Build each value with its unit suffix first, then use a single %Ns column
 # width so headers and data align in monospace output.
 print_summary() {
-  printf "%-22s %10s %10s %10s %10s  %12s %12s\n" \
-         "qdisc" "ping_avg" "ping_p99" "ping_max" "ping_loss" "bbperf_avg" "bbperf_p99"
-  printf "%-22s %10s %10s %10s %10s  %12s %12s\n" \
-         "-----" "--------" "--------" "--------" "---------" "----------" "----------"
+  printf "%-22s %6s %10s %10s %10s %10s  %12s %12s\n" \
+         "qdisc" "status" "ping_avg" "ping_p99" "ping_max" "ping_loss" "bbperf_avg" "bbperf_p99"
+  printf "%-22s %6s %10s %10s %10s %10s  %12s %12s\n" \
+         "-----" "------" "--------" "--------" "--------" "---------" "----------" "----------"
   for i in "${!TEST_NAMES[@]}"; do
-    printf "%-22s %10s %10s %10s %10s  %12s %12s\n" \
+    printf "%-22s %6s %10s %10s %10s %10s  %12s %12s\n" \
       "${TEST_NAMES[$i]}" \
+      "${TEST_STATUSES[$i]}" \
       "${PING_AVGS[$i]}ms" "${PING_P99S[$i]}ms" "${PING_MAXS[$i]}ms" \
       "${PING_LOSSES[$i]}%" \
       "${BBPERF_AVGS[$i]}ms" "${BBPERF_P99S[$i]}ms"

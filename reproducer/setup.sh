@@ -75,6 +75,78 @@ echo "COMMIT"
 )
 '
 
+# --- Show setup summary by inspecting actual netns state ---
+show_device() {
+  local ns="$1" dev="$2"
+  local info addr_info
+
+  info=$($SUDO ip -netns "$ns" -j -d link show "$dev")
+  addr_info=$($SUDO ip -netns "$ns" -j addr show "$dev")
+
+  local state addr
+  state=$(echo "$info" | jq -r '.[0].operstate')
+  addr=$(echo "$addr_info" | jq -r '.[0].addr_info[]? | select(.family=="inet") | "\(.local)/\(.prefixlen)"')
+
+  # Channel counts: real (active) and max from ethtool -l
+  local ch_out real_tx real_rx max_tx max_rx section=""
+  ch_out=$($SUDO ip netns exec "$ns" ethtool -l "$dev" 2>/dev/null)
+  max_tx=$(echo "$ch_out" | awk '/Pre-set maximums/{s=1;next} /Current/{s=0} s && /TX:/{print $2; exit}')
+  max_rx=$(echo "$ch_out" | awk '/Pre-set maximums/{s=1;next} /Current/{s=0} s && /RX:/{print $2; exit}')
+  real_tx=$(echo "$ch_out" | awk '/Current hardware/{s=1;next} s && /TX:/{print $2; exit}')
+  real_rx=$(echo "$ch_out" | awk '/Current hardware/{s=1;next} s && /RX:/{print $2; exit}')
+
+  # Feature flags (only show non-default/notable ones)
+  local features=""
+  local tso gro
+  tso=$($SUDO ip netns exec "$ns" ethtool -k "$dev" 2>/dev/null | awk '/^tcp-segmentation-offload:/{print $2}')
+  gro=$($SUDO ip netns exec "$ns" ethtool -k "$dev" 2>/dev/null | awk '/^generic-receive-offload:/{print $2}')
+  [ "$tso" = "off" ] && features="$features tso-off"
+  [ "$gro" = "on" ] && features="$features gro"
+
+  # Threaded NAPI
+  local threaded_file="/sys/class/net/${dev}/threaded"
+  local threaded
+  threaded=$($SUDO ip netns exec "$ns" cat "$threaded_file" 2>/dev/null || echo "")
+  [ "$threaded" = "1" ] && features="$features threaded-napi"
+
+  printf "  %-12s %-18s state %-4s  txq %s/%s  rxq %s/%s%s\n" \
+    "$dev" "${addr:-<no-ip>}" "$state" "$real_tx" "$max_tx" "$real_rx" "$max_rx" "$features"
+}
+
+echo ""
+echo "=== Setup summary ==="
+echo "Namespaces: $($SUDO ip netns list | sort | tr '\n' ' ')"
+echo ""
+
+echo "client:"
+show_device client to-router
+
+echo "router:"
+show_device router client-link
+show_device router server-link
+
+echo "server:"
+show_device server in-router
+
+# iptables rule count (server netns)
+ipt_count=$($SUDO ip netns exec server iptables -S INPUT 2>/dev/null | wc -l)
+echo ""
+echo "iptables INPUT rules (server): $ipt_count"
+
+# ip_forward (router)
+fwd=$($SUDO ip netns exec router sysctl -n net.ipv4.ip_forward 2>/dev/null)
+echo "ip_forward (router): $fwd"
+
+# Connectivity check
+echo ""
+if $SUDO ip netns exec client ping -c 1 -W 2 192.168.20.2 > /dev/null 2>&1; then
+  rtt=$($SUDO ip netns exec client ping -c 1 -W 2 192.168.20.2 2>/dev/null | awk -F'/' '/^rtt/{print $5}')
+  echo "Connectivity: client -> server OK (${rtt}ms)"
+else
+  echo "Connectivity: client -> server FAILED"
+fi
+echo ""
+
 # install bbperf (shared venv at repo root; selftests may use it too)
 [ ! -d "${REPO_ROOT}/venv" ] && virtualenv "${REPO_ROOT}/venv"
 source "${REPO_ROOT}/venv/bin/activate"

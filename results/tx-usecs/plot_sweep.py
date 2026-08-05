@@ -55,7 +55,10 @@ def plot_lines(df, cmdline, outdir, suffix="", use_p99=False):
     df = df.copy()
     df["tx_usecs_plot"] = df["tx_usecs"].replace(0, 1)
 
-    fig, (ax_pps, ax_rtt) = plt.subplots(1, 2, figsize=(14, 5))
+    # Scale figure width based on number of x-axis elements
+    num_elements = len(tx_orig)
+    width = max(14, num_elements * 1.2)  # At least 1.2 inches per element, minimum 14
+    fig, (ax_pps, ax_rtt) = plt.subplots(1, 2, figsize=(width, 5))
 
     for nrules, grp in df.groupby("nrules"):
         grp = grp.sort_values("tx_usecs_plot")
@@ -64,7 +67,13 @@ def plot_lines(df, cmdline, outdir, suffix="", use_p99=False):
 
     # Log-scale x-axis with explicit tick labels (0 plotted at 1)
     tx_ticks = sorted(df["tx_usecs_plot"].unique())
-    tx_labels = [_fmt_k(v) for v in tx_orig]
+    # Create mapping: for each plot tick, find the original value (0 if it was 0, otherwise the tick value)
+    tx_labels = []
+    for tick in tx_ticks:
+        if tick == 1 and 0 in tx_orig:
+            tx_labels.append("0")
+        else:
+            tx_labels.append(_fmt_k(tick))
     for ax in (ax_pps, ax_rtt):
         ax.set_xscale("log")
         ax.set_xticks(tx_ticks)
@@ -105,7 +114,11 @@ def plot_heatmaps(df, cmdline, outdir, suffix="", use_p99=False):
     pps_pivot = pps_pivot.sort_index(ascending=False)
     rtt_pivot = rtt_pivot.sort_index(ascending=False)
 
-    fig, (ax_pps, ax_rtt) = plt.subplots(1, 2, figsize=(14, 5))
+    # Scale figure width based on number of x-axis elements
+    tx_orig = sorted(df["tx_usecs"].unique())
+    num_elements = len(tx_orig)
+    width = max(14, num_elements * 1.2)  # At least 1.2 inches per element, minimum 14
+    fig, (ax_pps, ax_rtt) = plt.subplots(1, 2, figsize=(width, 5))
 
     im1 = ax_pps.imshow(pps_pivot.values, aspect="auto", cmap="YlGn")
     ax_pps.set_xticks(range(len(pps_pivot.columns)))
@@ -136,7 +149,7 @@ def plot_heatmaps(df, cmdline, outdir, suffix="", use_p99=False):
         for j in range(len(rtt_pivot.columns)):
             val = rtt_pivot.values[i, j]
             if not np.isnan(val):
-                ax_rtt.text(j, i, f"{val:.1f}", ha="center", va="center", fontsize=8)
+                ax_rtt.text(j, i, f"{val:.3f}", ha="center", va="center", fontsize=8)
     fig.colorbar(im2, ax=ax_rtt, shrink=0.8)
 
     if cmdline:

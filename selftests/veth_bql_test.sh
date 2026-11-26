@@ -69,6 +69,7 @@ USE_PKTGEN=0      # 1 to use kernel pktgen instead of udp_flood
 PKTGEN_SIZE=64    # pktgen packet size (default 64 for max pps)
 PKTGEN_THREADS=1  # number of pktgen kernel threads
 MQ_QUEUES=2       # multi-queue: number of TX/RX channels (0=single-queue)
+STARVE_NAPI=0     # seconds to starve peer NAPI threads (0=off), tests dev_watchdog recovery
 VETH_A="veth_bql0"
 VETH_B="veth_bql1"
 IP_A="10.99.0.1"
@@ -98,6 +99,7 @@ usage() {
     echo "  --pktgen-threads N pktgen kernel threads (default: $PKTGEN_THREADS)"
     echo "  --single-queue   use single TX queue (skip MQ+XPS, default: MQ=$MQ_QUEUES)"
     echo "  --mq-queues N    set number of TX/RX channels (default: $MQ_QUEUES)"
+    echo "  --starve-napi SEC starve peer NAPI threads for SEC seconds (>5) to test dev_watchdog recovery"
     exit 1
 }
 
@@ -123,6 +125,7 @@ while [ $# -gt 0 ]; do
     --pktgen-threads) PKTGEN_THREADS="$2"; shift 2 ;;
     --single-queue) MQ_QUEUES=0; shift ;;
     --mq-queues)  MQ_QUEUES="$2"; shift 2 ;;
+    --starve-napi) STARVE_NAPI="$2"; shift 2 ;;
     --help|-h)    usage ;;
     *)            echo "Unknown option: $1" >&2; usage ;;
     esac
@@ -153,9 +156,15 @@ BPFTRACE_PID=""
 BPFTRACE2_PID=""
 BPFTRACE3_PID=""
 PKTGEN_TIMER_PID=""
+HOG_PID=""
+ORIG_RT_RUNTIME=""
+ORIG_FAIR_RUNTIME=""
+FAIR_SERVER_RUNTIME=""
 
 # shellcheck disable=SC2329  # cleanup is invoked indirectly via trap
 cleanup() {
+    [ -n "$HOG_PID" ] && kill_process "$HOG_PID"
+    restore_sched
     [ -n "$BPFTRACE3_PID" ] && kill_process "$BPFTRACE3_PID"
     [ -n "$BPFTRACE2_PID" ] && kill_process "$BPFTRACE2_PID"
     [ -n "$BPFTRACE_PID" ] && kill_process "$BPFTRACE_PID"
@@ -729,6 +738,86 @@ verify_traffic_flowing() {
     return 1
 }
 
+# shellcheck disable=SC2329  # also invoked from cleanup via trap
+restore_sched() {
+    if [ -n "$ORIG_FAIR_RUNTIME" ]; then
+        echo "$ORIG_FAIR_RUNTIME" > "$FAIR_SERVER_RUNTIME"
+        ORIG_FAIR_RUNTIME=""
+    fi
+    if [ -n "$ORIG_RT_RUNTIME" ]; then
+        echo "$ORIG_RT_RUNTIME" > /proc/sys/kernel/sched_rt_runtime_us
+        ORIG_RT_RUNTIME=""
+    fi
+}
+
+# Starve the peer NAPI kthreads so the ptr_ring stays full and the TXQ
+# stays stopped for longer than watchdog_timeo (5s).  This makes
+# dev_watchdog call veth_tx_timeout().  A SCHED_FIFO busy loop runs on
+# the last CPU, the NAPI threads are pinned there, and RT throttling and
+# the fair_server are disabled on that CPU so SCHED_NORMAL gets no time.
+starve_napi() {
+    local sec="$1"
+    local cpu=$(( $(nproc) - 1 ))
+    local others="0-$((cpu - 1))"
+    local pids pid
+
+    pids=$(pgrep "^napi/${VETH_B}") || true
+    if [ -z "$pids" ]; then
+        log_info "No NAPI threads found for $VETH_B (threaded NAPI off?)"
+        return 1
+    fi
+    for pid in $pids; do
+        taskset -pc "$cpu" "$pid" >/dev/null
+    done
+    # Keep the test itself and the traffic off the starved CPU
+    for pid in $$ $FLOOD_PID $SINK_PID $PING_PID; do
+        taskset -pc "$others" "$pid" >/dev/null 2>&1 || true
+    done
+
+    ORIG_RT_RUNTIME=$(cat /proc/sys/kernel/sched_rt_runtime_us)
+    echo -1 > /proc/sys/kernel/sched_rt_runtime_us
+    mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug
+    FAIR_SERVER_RUNTIME="/sys/kernel/debug/sched/fair_server/cpu${cpu}/runtime"
+    if [ -w "$FAIR_SERVER_RUNTIME" ]; then
+        ORIG_FAIR_RUNTIME=$(cat "$FAIR_SERVER_RUNTIME")
+        echo 0 > "$FAIR_SERVER_RUNTIME"
+    fi
+
+    log_info "Starving NAPI threads ($(tr '\n' ' ' <<< "$pids")) on CPU $cpu for ${sec}s"
+    taskset -c "$cpu" chrt -f 50 sh -c 'while :; do :; done' &
+    HOG_PID=$!
+    sleep "$sec"
+    kill_process "$HOG_PID"
+    HOG_PID=""
+    restore_sched
+    log_info "NAPI starvation ended"
+}
+
+# Expect: dev_watchdog fires during the starvation, veth_tx_timeout()
+# logs the peer rq state, and traffic flows again afterwards.
+test_starve_napi_recovery() {
+    local wd
+
+    sleep 3
+    verify_traffic_flowing "[pre-starve]" || true
+    starve_napi "$STARVE_NAPI" || { RET=$ksft_fail; retmsg="starve setup failed"; return; }
+
+    wd=$(cat /sys/class/net/${VETH_A}/queues/tx-${MQ_TXQ}/tx_timeout 2>/dev/null) || wd=0
+    log_info "Watchdog count after starvation: $wd"
+    dmesg | tail -n +$((DMESG_BEFORE + 1)) | grep -E 'NETDEV WATCHDOG|veth backpressure' || true
+    if [ "$wd" -eq 0 ]; then
+        RET=$ksft_fail
+        retmsg="dev_watchdog did not fire during ${STARVE_NAPI}s NAPI starvation"
+        return
+    fi
+
+    sleep 1
+    if ! verify_traffic_flowing "[post-starve]"; then
+        RET=$ksft_fail
+        retmsg="traffic did not recover after NAPI starvation"
+    fi
+}
+
 collect_results() {
     local test_name="${1:-veth_bql}"
 
@@ -854,6 +943,7 @@ test_bql_stress() {
     else
         start_traffic
     fi
+    [ "$STARVE_NAPI" -gt 0 ] && test_starve_napi_recovery
     monitor_loop
     collect_results "veth_bql"
 }

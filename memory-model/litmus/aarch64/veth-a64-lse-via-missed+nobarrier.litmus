@@ -1,0 +1,44 @@
+AArch64 veth-a64-lse-via-missed+nobarrier
+"veth-handoff-via-missed as arm64 code with LSE atomics, no barrier"
+(*
+ * Result: Sometimes
+ *
+ * The kthread sees SCHED_THREADED in a value that another CPU wrote.
+ * This is the LKMM test veth-handoff-via-missed as arm64 instructions,
+ * for a CPU with LSE atomics.
+ *
+ * The test starts after the first producer took SCHED (state starts
+ * at 0x1).
+ *
+ * P0: first producer
+ *     STRB       WRITE_ONCE(rq->rx_notify_masked, true)
+ *     STSET      set_bit(NAPI_STATE_SCHED_THREADED)
+ * P1: second producer
+ *     CASAL      napi_schedule_prep(): cmpxchg() sets MISSED.  It
+ *                succeeds only on top of P0's STSET (0x201 -> 0x203).
+ * P2: NAPI kthread
+ *     LDR, TBZ   test_bit(NAPI_STATE_SCHED_THREADED)
+ *     STRB       smp_store_mb(rq->rx_notify_masked, false)
+ *     DMB ISH
+ *
+ * Bad state: the kthread read state == 0x203 (515), so it saw
+ * SCHED_THREADED through P1's update.  It cleared rx_notify_masked.  But
+ * rx_notify_masked is true at the end: P0's store landed last.
+ *
+ * napi->state uses the kernel bit values: SCHED = 0x1, MISSED = 0x2,
+ * SCHED_THREADED = 0x200.
+ *)
+{
+uint64_t state=1; uint8_t masked=0;
+0:X1=masked; 0:X2=state;
+1:X1=masked; 1:X2=state;
+2:X1=masked; 2:X2=state;
+}
+ P0               | P1               | P2               ;
+ MOV W6,#1        | MOV X3,#513      | LDR X3,[X2]      ;
+ STRB W6,[X1]     | MOV X4,#515      | TBZ X3,#9,LC20   ;
+ MOV X7,#512      | CASAL X3,X4,[X2] | MOV W5,#0        ;
+ STSET X7,[X2]    |                  | STRB W5,[X1]     ;
+                  |                  | DMB ISH          ;
+                  |                  | LC20:            ;
+exists (2:X3=515 /\ masked=1)

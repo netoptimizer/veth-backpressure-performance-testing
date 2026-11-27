@@ -1,0 +1,99 @@
+C veth-busypoll-rearm-producer+nobarrier
+
+(*
+ * Result: Sometimes
+ * Runtime: slow (about 15 minutes)
+ *
+ * As veth-busypoll-rearm, with the producer of the ring entry.
+ *
+ * P0: end of veth_poll(), called from busy_poll_stop().  It owns SCHED
+ *     (state starts at 1).
+ * P1: producer: ptr_ring_produce(), then __veth_xdp_flush().
+ * P2: NAPI kthread.  When napi_complete_done() finds MISSED, it polls
+ *     once more.
+ *
+ * P0 and P1 can both try to take SCHED.  The loser sets MISSED.
+ *
+ * Not modelled: the kthread does not consume the ring entry.  P0 can
+ * then re-arm NAPI in more cases than in the kernel.
+ *
+ * smp_wmb(): none.  This is the code before the fix.
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true.  __veth_xdp_flush() then never schedules NAPI again.
+ *
+ * napi->state is one word: state = count + 16 * T
+ *   count: 0 = idle, 1 = SCHED, 2 = SCHED | MISSED
+ *   T:     SCHED_THREADED
+ *)
+
+{
+	atomic_t state = ATOMIC_INIT(1);
+	int masked = 0;
+	int ring = 0;
+}
+
+P0(atomic_t *state, int *masked, int *ring)
+{
+	int o1;
+	int e1;
+	int o2;
+
+	o1 = atomic_fetch_sub(1, state); /* napi_complete_done() */
+	if (o1 == 1) {
+		WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+		smp_mb();
+		e1 = READ_ONCE(*ring); /* !__ptr_ring_empty() */
+		if (e1 == 1) {
+			o2 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+			if (o2 == 0) {
+				WRITE_ONCE(*masked, 1);
+				atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+			}
+		}
+	} else {
+		atomic_or(16, state); /* MISSED: __napi_schedule() */
+	}
+}
+
+P1(atomic_t *state, int *masked, int *ring)
+{
+	int m1;
+	int o1;
+
+	WRITE_ONCE(*ring, 1); /* ptr_ring_produce() */
+	smp_mb(); /* __veth_xdp_flush() */
+	m1 = READ_ONCE(*masked);
+	if (m1 == 0) {
+		o1 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+		if (o1 == 0) {
+			WRITE_ONCE(*masked, 1);
+			atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+		}
+	}
+}
+
+P2(atomic_t *state, int *masked, int *ring)
+{
+	int t1;
+	int o1;
+	int o2;
+
+	t1 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+	if (t1 & 16) {
+		o1 = atomic_fetch_sub(17, state); /* napi_complete_done() */
+		if (o1 == 17) {
+			WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+			smp_mb();
+		} else {
+			/* MISSED: SCHED stays set, the kthread polls again */
+			o2 = atomic_fetch_sub(1, state); /* napi_complete_done() */
+			if (o2 == 1) {
+				WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+				smp_mb();
+			}
+		}
+	}
+}
+
+exists (state=0 /\ masked=1)

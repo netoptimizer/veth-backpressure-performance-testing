@@ -1,0 +1,62 @@
+C veth-handoff-via-missed+nobarrier
+
+(*
+ * Result: Sometimes
+ *
+ * The kthread sees SCHED_THREADED in a value that another CPU wrote.
+ *
+ * This test is cut down to one ordering question.  It starts after the
+ * first producer took SCHED (state starts at 1).
+ *
+ * P0: first producer.  It sets rx_notify_masked, then SCHED_THREADED.
+ * P1: second producer.  Its napi_schedule_prep() finds SCHED set and
+ *     sets MISSED.  The cmpxchg() succeeds only on top of P0's
+ *     SCHED_THREADED (17 -> 18).
+ * P2: NAPI kthread.  test_bit(SCHED_THREADED), then rx_notify_masked =
+ *     false.  NAPI completion is left out.
+ *
+ * With the smp_wmb(), LKMM forbids the bad state through its
+ * rmw-sequence rule (Linux v6.3, commit ebd50e2947de).  The arm64 test
+ * veth-a64-lse-via-missed checks the same case on arm64.
+ *
+ * smp_wmb(): none.  This is the code before the fix.
+ *
+ * Bad state: the kthread read state == 18, so it saw SCHED_THREADED
+ * through P1's update.  It cleared rx_notify_masked.  But
+ * rx_notify_masked is true at the end: P0's store landed last.
+ *
+ * napi->state is one word: state = count + 16 * T
+ *   count: 0 = idle, 1 = SCHED, 2 = SCHED | MISSED
+ *   T:     SCHED_THREADED
+ *)
+
+{
+	atomic_t state = ATOMIC_INIT(1);
+	int masked = 0;
+}
+
+P0(atomic_t *state, int *masked)
+{
+	WRITE_ONCE(*masked, 1);
+	atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+}
+
+P1(atomic_t *state, int *masked)
+{
+	int o1;
+
+	o1 = atomic_cmpxchg(state, 17, 18); /* napi_schedule_prep() sets MISSED */
+}
+
+P2(atomic_t *state, int *masked)
+{
+	int t1;
+
+	t1 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+	if (t1 & 16) {
+		WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+		smp_mb();
+	}
+}
+
+exists (2:t1=18 /\ masked=1)

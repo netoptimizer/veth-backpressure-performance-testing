@@ -1,0 +1,89 @@
+C veth-busypoll-rearm+flush-only
+
+(*
+ * Result: Sometimes
+ *
+ * The re-arm path of veth_poll() on a CPU that is not the NAPI kthread.
+ *
+ * With socket busy polling, busy_poll_stop() calls veth_poll() on the
+ * CPU of the application.
+ *
+ * P0: end of veth_poll(), called from busy_poll_stop().  It owns SCHED
+ *     (state starts at 1).  An entry arrived in the ring after
+ *     veth_xdp_rcv() returned (ring starts at 1).  The ring check
+ *     re-arms NAPI: rx_notify_masked = true, then SCHED_THREADED.
+ * P1: NAPI kthread that is awake, one poll.
+ *
+ * smp_wmb(): in __veth_xdp_flush() only.  This is the first version of
+ * the fix.  The re-arm path in veth_poll() has no barrier.
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true, or NAPI is idle and the ring still holds an entry.
+ *
+ * napi->state is one word: state = count + 16 * T
+ *   count: 0 = idle, 1 = SCHED, 2 = SCHED | MISSED
+ *   T:     SCHED_THREADED
+ *)
+
+{
+	atomic_t state = ATOMIC_INIT(1);
+	int masked = 0;
+	int ring = 1;
+}
+
+P0(atomic_t *state, int *masked, int *ring)
+{
+	int o1;
+	int e1;
+	int o2;
+
+	o1 = atomic_fetch_sub(1, state); /* napi_complete_done() */
+	if (o1 == 1) {
+		WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+		smp_mb();
+		e1 = READ_ONCE(*ring); /* !__ptr_ring_empty() */
+		if (e1 == 1) {
+			o2 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+			if (o2 == 0) {
+				WRITE_ONCE(*masked, 1);
+				atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+			}
+		}
+	} else {
+		atomic_or(16, state); /* MISSED: __napi_schedule() */
+	}
+}
+
+P1(atomic_t *state, int *masked, int *ring)
+{
+	int t1;
+	int c1;
+	int o1;
+	int e1;
+	int o2;
+
+	t1 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+	if (t1 & 16) {
+		c1 = READ_ONCE(*ring); /* veth_xdp_rcv() */
+		if (c1 == 1) {
+			WRITE_ONCE(*ring, 0);
+		}
+		o1 = atomic_fetch_sub(17, state); /* napi_complete_done() */
+		if (o1 == 17) {
+			WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+			smp_mb();
+			e1 = READ_ONCE(*ring); /* !__ptr_ring_empty() */
+			if (e1 == 1) {
+				o2 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+				if (o2 == 0) {
+					WRITE_ONCE(*masked, 1);
+					atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+				}
+			}
+		} else {
+			atomic_or(16, state); /* MISSED: __napi_schedule() */
+		}
+	}
+}
+
+exists (state=0 /\ (masked=1 \/ ring=1))

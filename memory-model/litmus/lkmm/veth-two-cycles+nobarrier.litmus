@@ -1,0 +1,89 @@
+C veth-two-cycles+nobarrier
+
+(*
+ * Result: Sometimes
+ * Runtime: slow (about 10 minutes)
+ *
+ * Two producers and the NAPI kthread, two NAPI cycles.
+ *
+ * P0, P1: producers in __veth_xdp_flush().
+ * P2: NAPI kthread.  It waits for SCHED_THREADED and polls, two times.
+ *     The second producer can take SCHED after the kthread completed
+ *     the first poll.
+ *
+ * When napi_complete_done() finds MISSED, the kthread stops and the
+ * test ends.  veth-two-producers covers that case.
+ *
+ * smp_wmb(): none.  This is the code before the fix.
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true.  __veth_xdp_flush() then never schedules NAPI again.
+ *
+ * napi->state is one word: state = count + 16 * T
+ *   count: 0 = idle, 1 = SCHED, 2 = SCHED | MISSED
+ *   T:     SCHED_THREADED
+ *)
+
+{
+	atomic_t state = ATOMIC_INIT(0);
+	int masked = 0;
+}
+
+P0(atomic_t *state, int *masked)
+{
+	int m1;
+	int o1;
+
+	smp_mb(); /* __veth_xdp_flush() */
+	m1 = READ_ONCE(*masked);
+	if (m1 == 0) {
+		o1 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+		if (o1 == 0) {
+			WRITE_ONCE(*masked, 1);
+			atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+		}
+	}
+}
+
+P1(atomic_t *state, int *masked)
+{
+	int m1;
+	int o1;
+
+	smp_mb(); /* __veth_xdp_flush() */
+	m1 = READ_ONCE(*masked);
+	if (m1 == 0) {
+		o1 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+		if (o1 == 0) {
+			WRITE_ONCE(*masked, 1);
+			atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+		}
+	}
+}
+
+P2(atomic_t *state, int *masked)
+{
+	int t1;
+	int o1;
+	int t2;
+	int o2;
+
+	t1 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+	if (t1 & 16) {
+		o1 = atomic_fetch_sub(17, state); /* napi_complete_done() */
+		if (o1 == 17) {
+			WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+			smp_mb();
+			t2 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+			if (t2 & 16) {
+				o2 = atomic_fetch_sub(17, state); /* napi_complete_done() */
+				if (o2 == 17) {
+					WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+					smp_mb();
+				}
+			}
+		}
+	}
+}
+
+exists (state=0 /\ masked=1)

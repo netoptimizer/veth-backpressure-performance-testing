@@ -1,0 +1,59 @@
+C veth-handoff-ctrl-dep+wmb
+
+(*
+ * Result: Never
+ *
+ * Same as veth-handoff+wmb, but napi_complete_done() is a relaxed
+ * (unordered) RMW here.  The kernel uses a fully ordered cmpxchg().
+ *
+ * This shows that the control dependency from test_bit() alone already
+ * orders the kthread's rx_notify_masked = false store after the read.
+ *
+ * smp_wmb(): before __napi_schedule().  This is the fix.
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true.  __veth_xdp_flush() then never schedules NAPI again.
+ *
+ * napi->state is one word: state = count + 16 * T
+ *   count: 0 = idle, 1 = SCHED, 2 = SCHED | MISSED
+ *   T:     SCHED_THREADED
+ *)
+
+{
+	atomic_t state = ATOMIC_INIT(0);
+	int masked = 0;
+}
+
+P0(atomic_t *state, int *masked)
+{
+	int m1;
+	int o1;
+
+	smp_mb(); /* __veth_xdp_flush() */
+	m1 = READ_ONCE(*masked);
+	if (m1 == 0) {
+		o1 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+		if (o1 == 0) {
+			WRITE_ONCE(*masked, 1);
+			smp_wmb(); /* the fix */
+			atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+		}
+	}
+}
+
+P1(atomic_t *state, int *masked)
+{
+	int t1;
+	int o1;
+
+	t1 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+	if (t1 & 16) {
+		o1 = atomic_fetch_sub_relaxed(17, state); /* napi_complete_done() */
+		if (o1 == 17) {
+			WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+			smp_mb();
+		}
+	}
+}
+
+exists (state=0 /\ masked=1)

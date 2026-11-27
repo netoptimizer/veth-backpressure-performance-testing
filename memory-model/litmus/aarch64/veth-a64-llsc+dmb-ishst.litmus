@@ -1,0 +1,49 @@
+AArch64 veth-a64-llsc+dmb-ishst
+"veth-handoff as arm64 code with LL/SC atomics, with smp_wmb()"
+(*
+ * Result: Never
+ *
+ * The veth-handoff race as arm64 instructions.  The CPU has no LSE
+ * atomics, so the kernel uses load-exclusive and store-exclusive.
+ *
+ * P0: producer in __veth_xdp_flush()
+ *     LDXR, STLXR, DMB ISH   napi_schedule_prep(): cmpxchg() takes SCHED
+ *     STRB                   WRITE_ONCE(rq->rx_notify_masked, true)
+ *     DMB ISHST              smp_wmb(): the fix
+ *     LDXR, ORR, STXR        set_bit(NAPI_STATE_SCHED_THREADED)
+ * P1: NAPI kthread that is awake
+ *     LDR, TBZ               test_bit(NAPI_STATE_SCHED_THREADED)
+ *     LDXR, STLXR, DMB ISH   napi_complete_done(): cmpxchg() clears SCHED
+ *                            and SCHED_THREADED
+ *     STRB                   smp_store_mb(rq->rx_notify_masked, false)
+ *     DMB ISH
+ *
+ * The kernel retries a failed store-exclusive.  The test does not: the
+ * thread ends, and that execution cannot reach the bad state.
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true.
+ *
+ * napi->state uses the kernel bit values: SCHED = 0x1,
+ * SCHED_THREADED = 0x200.
+ *)
+{
+uint64_t state=0; uint8_t masked=0;
+0:X1=masked; 0:X2=state;
+1:X1=masked; 1:X2=state;
+}
+ P0               | P1               ;
+ LDXR X3,[X2]     | LDR X3,[X2]      ;
+ CBNZ X3,LC00     | TBZ X3,#9,LC10   ;
+ MOV X4,#1        | LDXR X4,[X2]     ;
+ STLXR W5,X4,[X2] | CMP X4,#513      ;
+ CBNZ W5,LC00     | B.NE LC10        ;
+ DMB ISH          | MOV X5,#0        ;
+ MOV W6,#1        | STLXR W6,X5,[X2] ;
+ STRB W6,[X1]     | CBNZ W6,LC10     ;
+ DMB ISHST        | DMB ISH          ;
+ LDXR X7,[X2]     | STRB W5,[X1]     ;
+ ORR X7,X7,#512   | DMB ISH          ;
+ STXR W8,X7,[X2]  | LC10:            ;
+ LC00:            |                  ;
+exists (state=0 /\ masked=1)

@@ -1,0 +1,42 @@
+AArch64 veth-a64-lse+nobarrier
+"veth-handoff as arm64 code with LSE atomics, no barrier"
+(*
+ * Result: Sometimes
+ *
+ * The veth-handoff race as arm64 instructions.  The CPU has LSE
+ * atomics (ARMv8.1 and later).
+ *
+ * P0: producer in __veth_xdp_flush()
+ *     CASAL      napi_schedule_prep(): cmpxchg() takes SCHED
+ *     STRB       WRITE_ONCE(rq->rx_notify_masked, true)
+ *     STSET      set_bit(NAPI_STATE_SCHED_THREADED)
+ * P1: NAPI kthread that is awake
+ *     LDR, TBZ   test_bit(NAPI_STATE_SCHED_THREADED)
+ *     CASAL      napi_complete_done(): cmpxchg() clears SCHED and
+ *                SCHED_THREADED
+ *     STRB       smp_store_mb(rq->rx_notify_masked, false)
+ *     DMB ISH
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true.
+ *
+ * napi->state uses the kernel bit values: SCHED = 0x1,
+ * SCHED_THREADED = 0x200.
+ *)
+{
+uint64_t state=0; uint8_t masked=0;
+0:X1=masked; 0:X2=state;
+1:X1=masked; 1:X2=state;
+}
+ P0               | P1               ;
+ MOV X3,#0        | LDR X3,[X2]      ;
+ MOV X4,#1        | TBZ X3,#9,LC10   ;
+ CASAL X3,X4,[X2] | MOV X4,#513      ;
+ CBNZ X3,LC00     | MOV X5,#0        ;
+ MOV W6,#1        | CASAL X4,X5,[X2] ;
+ STRB W6,[X1]     | CMP X4,#513      ;
+ MOV X7,#512      | B.NE LC10        ;
+ STSET X7,[X2]    | STRB W5,[X1]     ;
+ LC00:            | DMB ISH          ;
+                  | LC10:            ;
+exists (state=0 /\ masked=1)

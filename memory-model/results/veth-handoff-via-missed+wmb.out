@@ -1,0 +1,12 @@
+Test veth-handoff-via-missed+wmb Allowed
+States 3
+2:t1=1; [masked]=1;
+2:t1=17; [masked]=0;
+2:t1=18; [masked]=0;
+No
+Witnesses
+Positive: 0 Negative: 5
+Condition exists (2:t1=18 /\ [masked]=1)
+Observation veth-handoff-via-missed+wmb Never 0 5
+Hash=b9faafcdb876f982d2233aaa30589fe8
+

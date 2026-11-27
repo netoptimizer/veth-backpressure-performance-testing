@@ -1,0 +1,15 @@
+Test veth-busypoll-rearm-producer+nobarrier Allowed
+States 6
+[masked]=0; [state]=0;
+[masked]=0; [state]=17;
+[masked]=0; [state]=18;
+[masked]=1; [state]=0;
+[masked]=1; [state]=17;
+[masked]=1; [state]=18;
+Ok
+Witnesses
+Positive: 14 Negative: 95
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-busypoll-rearm-producer+nobarrier Sometimes 14 95
+Hash=4b44202b4f880e3b0907f6374fec2fab
+

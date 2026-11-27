@@ -1,0 +1,14 @@
+Test veth-two-cycles+wmb Allowed
+States 5
+[masked]=0; [state]=0;
+[masked]=0; [state]=17;
+[masked]=1; [state]=1;
+[masked]=1; [state]=17;
+[masked]=1; [state]=18;
+No
+Witnesses
+Positive: 0 Negative: 38
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-two-cycles+wmb Never 0 38
+Hash=77323855e595ff94fa145887f926eaf6
+

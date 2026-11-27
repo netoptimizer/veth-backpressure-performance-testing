@@ -1,0 +1,61 @@
+C veth-handoff+wmb
+
+(*
+ * Result: Never
+ *
+ * The race in its smallest form.
+ *
+ * P0: producer in __veth_xdp_flush().  It takes SCHED, sets
+ *     rx_notify_masked, then sets SCHED_THREADED.
+ * P1: NAPI kthread that is awake.  It sees SCHED_THREADED in
+ *     napi_thread_wait(), polls, completes NAPI, then clears
+ *     rx_notify_masked.
+ *
+ * smp_wmb(): before __napi_schedule().  This is the fix.
+ *
+ * Bad state: NAPI is idle (state == 0) and rx_notify_masked is still
+ * true.  __veth_xdp_flush() then never schedules NAPI again.
+ *
+ * napi->state is one word: state = count + 16 * T
+ *   count: 0 = idle, 1 = SCHED, 2 = SCHED | MISSED
+ *   T:     SCHED_THREADED
+ *)
+
+{
+	atomic_t state = ATOMIC_INIT(0);
+	int masked = 0;
+}
+
+P0(atomic_t *state, int *masked)
+{
+	int m1;
+	int o1;
+
+	smp_mb(); /* __veth_xdp_flush() */
+	m1 = READ_ONCE(*masked);
+	if (m1 == 0) {
+		o1 = atomic_fetch_add(1, state); /* napi_schedule_prep() */
+		if (o1 == 0) {
+			WRITE_ONCE(*masked, 1);
+			smp_wmb(); /* the fix */
+			atomic_or(16, state); /* set_bit(SCHED_THREADED) */
+		}
+	}
+}
+
+P1(atomic_t *state, int *masked)
+{
+	int t1;
+	int o1;
+
+	t1 = atomic_read(state); /* test_bit(SCHED_THREADED) */
+	if (t1 & 16) {
+		o1 = atomic_fetch_sub(17, state); /* napi_complete_done() */
+		if (o1 == 17) {
+			WRITE_ONCE(*masked, 0); /* smp_store_mb() */
+			smp_mb();
+		}
+	}
+}
+
+exists (state=0 /\ masked=1)

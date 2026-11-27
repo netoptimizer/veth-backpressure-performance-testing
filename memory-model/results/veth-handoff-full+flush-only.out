@@ -1,0 +1,11 @@
+Test veth-handoff-full+flush-only Allowed
+States 2
+[masked]=0; [ring]=0; [state]=0;
+[masked]=1; [ring]=1; [state]=17;
+No
+Witnesses
+Positive: 0 Negative: 4
+Condition exists ([state]=0 /\ ([masked]=1 \/ [ring]=1))
+Observation veth-handoff-full+flush-only Never 0 4
+Hash=8f7580bdf6433013eafcf1441dd58ed6
+

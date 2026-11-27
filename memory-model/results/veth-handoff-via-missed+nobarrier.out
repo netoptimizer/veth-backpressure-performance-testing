@@ -1,0 +1,14 @@
+Test veth-handoff-via-missed+nobarrier Allowed
+States 5
+2:t1=1; [masked]=1;
+2:t1=17; [masked]=0;
+2:t1=17; [masked]=1;
+2:t1=18; [masked]=0;
+2:t1=18; [masked]=1;
+Ok
+Witnesses
+Positive: 1 Negative: 7
+Condition exists (2:t1=18 /\ [masked]=1)
+Observation veth-handoff-via-missed+nobarrier Sometimes 1 7
+Hash=61a0daf98c529c3d9cace85b40f3029b
+

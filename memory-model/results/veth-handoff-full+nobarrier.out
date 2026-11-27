@@ -1,0 +1,12 @@
+Test veth-handoff-full+nobarrier Allowed
+States 3
+[masked]=0; [ring]=0; [state]=0;
+[masked]=1; [ring]=0; [state]=0;
+[masked]=1; [ring]=1; [state]=17;
+Ok
+Witnesses
+Positive: 1 Negative: 6
+Condition exists ([state]=0 /\ ([masked]=1 \/ [ring]=1))
+Observation veth-handoff-full+nobarrier Sometimes 1 6
+Hash=005bd06f62c0c27adee5885f2880591d
+

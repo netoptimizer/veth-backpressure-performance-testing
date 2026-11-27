@@ -1,0 +1,12 @@
+Test veth-busypoll-rearm+flush-only Allowed
+States 3
+[masked]=0; [ring]=0; [state]=0;
+[masked]=1; [ring]=0; [state]=0;
+[masked]=1; [ring]=1; [state]=17;
+Ok
+Witnesses
+Positive: 1 Negative: 4
+Condition exists ([state]=0 /\ ([masked]=1 \/ [ring]=1))
+Observation veth-busypoll-rearm+flush-only Sometimes 1 4
+Hash=95e4420041a0877d40c764dce719c1c5
+

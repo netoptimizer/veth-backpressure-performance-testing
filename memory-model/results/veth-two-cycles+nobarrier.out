@@ -1,0 +1,15 @@
+Test veth-two-cycles+nobarrier Allowed
+States 6
+[masked]=0; [state]=0;
+[masked]=0; [state]=17;
+[masked]=1; [state]=0;
+[masked]=1; [state]=1;
+[masked]=1; [state]=17;
+[masked]=1; [state]=18;
+Ok
+Witnesses
+Positive: 24 Negative: 70
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-two-cycles+nobarrier Sometimes 24 70
+Hash=7301909c0a4980327585192e83513417
+

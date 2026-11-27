@@ -1,0 +1,11 @@
+Test veth-handoff-full+helper Allowed
+States 2
+[masked]=0; [ring]=0; [state]=0;
+[masked]=1; [ring]=1; [state]=17;
+No
+Witnesses
+Positive: 0 Negative: 4
+Condition exists ([state]=0 /\ ([masked]=1 \/ [ring]=1))
+Observation veth-handoff-full+helper Never 0 4
+Hash=3f9a7c328bfa1ebad897f00db6a3a45e
+

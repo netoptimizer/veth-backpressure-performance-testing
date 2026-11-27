@@ -1,0 +1,11 @@
+Test veth-handoff-ctrl-dep+wmb Allowed
+States 2
+[masked]=0; [state]=0;
+[masked]=1; [state]=17;
+No
+Witnesses
+Positive: 0 Negative: 3
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-handoff-ctrl-dep+wmb Never 0 3
+Hash=c48b19aa6d3a1cd0245f731f769d426d
+

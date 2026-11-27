@@ -1,0 +1,3 @@
+# run-herd7.sh writes here when it does not run all tests (-q, or tests
+# given on the command line).  results/ holds the recorded full run.
+results-partial/

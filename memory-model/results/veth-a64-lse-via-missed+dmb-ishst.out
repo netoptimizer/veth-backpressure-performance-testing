@@ -1,0 +1,13 @@
+Test veth-a64-lse-via-missed+dmb-ishst Allowed
+States 3
+2:X3=1; [masked]=1;
+2:X3=513; [masked]=0;
+2:X3=515; [masked]=0;
+No
+Witnesses
+Positive: 0 Negative: 13
+Flag Assuming-common-inner-shareable-domain
+Condition exists (2:X3=515 /\ [masked]=1)
+Observation veth-a64-lse-via-missed+dmb-ishst Never 0 13
+Hash=9ce106e75ada7d5d20aeece4dce4abe0
+

@@ -1,0 +1,15 @@
+Test veth-a64-lse-via-missed+nobarrier Allowed
+States 5
+2:X3=1; [masked]=1;
+2:X3=513; [masked]=0;
+2:X3=513; [masked]=1;
+2:X3=515; [masked]=0;
+2:X3=515; [masked]=1;
+Ok
+Witnesses
+Positive: 2 Negative: 18
+Flag Assuming-common-inner-shareable-domain
+Condition exists (2:X3=515 /\ [masked]=1)
+Observation veth-a64-lse-via-missed+nobarrier Sometimes 2 18
+Hash=15e1af67e31b2609282a088fafe98b0a
+

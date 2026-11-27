@@ -1,0 +1,14 @@
+Test veth-busypoll-rearm-producer+helper Allowed
+States 5
+[masked]=0; [state]=0;
+[masked]=0; [state]=17;
+[masked]=0; [state]=18;
+[masked]=1; [state]=17;
+[masked]=1; [state]=18;
+No
+Witnesses
+Positive: 0 Negative: 74
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-busypoll-rearm-producer+helper Never 0 74
+Hash=33d723eefd8e5739ece0adcb80adb1b9
+

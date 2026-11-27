@@ -1,0 +1,14 @@
+Test veth-two-producers+nobarrier Allowed
+States 5
+[masked]=0; [state]=0;
+[masked]=0; [state]=17;
+[masked]=1; [state]=0;
+[masked]=1; [state]=17;
+[masked]=1; [state]=18;
+Ok
+Witnesses
+Positive: 8 Negative: 40
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-two-producers+nobarrier Sometimes 8 40
+Hash=d2f10dee2746e79d8de6d29c1d5dc3ef
+

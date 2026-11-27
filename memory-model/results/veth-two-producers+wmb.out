@@ -1,0 +1,13 @@
+Test veth-two-producers+wmb Allowed
+States 4
+[masked]=0; [state]=0;
+[masked]=0; [state]=17;
+[masked]=1; [state]=17;
+[masked]=1; [state]=18;
+No
+Witnesses
+Positive: 0 Negative: 28
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-two-producers+wmb Never 0 28
+Hash=df7974d187f239bb2c2f9a33959bee2c
+

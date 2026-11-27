@@ -1,0 +1,13 @@
+Test veth-a64-lse+nobarrier Allowed
+States 3
+[masked]=0; [state]=0;
+[masked]=1; [state]=0;
+[masked]=1; [state]=513;
+Ok
+Witnesses
+Positive: 4 Negative: 8
+Flag Assuming-common-inner-shareable-domain
+Condition exists ([state]=0 /\ [masked]=1)
+Observation veth-a64-lse+nobarrier Sometimes 4 8
+Hash=98f6c562c79f2bee0f9d1df11362985b
+

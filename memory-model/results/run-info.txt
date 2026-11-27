@@ -1,0 +1,39 @@
+date:        2026-11-27
+herd7:       7.58, Rev: exported
+herd7 flags: -optace true (LKMM tests only)
+kernel:      6.18.65
+LKMM files (sha256):
+  ab57943799d445327c3c7cf0a1ca9f9fae8e7379e45b9fc90312993bb038e23f  linux-kernel.bell
+  250207709250d308e0a0a6f391c4eda0bbf4876cbc55eccbfbcd495676a179be  linux-kernel.cat
+  37c57d82291113c5a4a170f3f6b5b8f01bc18403d701b8e5a6db43aae62d6b32  linux-kernel.cfg
+  a04911d85fd86f5dbcf8ed436c7a2570fcc615f768c0c19b0a101f6212d2504c  linux-kernel.def
+cpu:         12th Gen Intel(R) Core(TM) i7-12800H
+cpus:        12, 12 tests at a time
+time limit:  3600s
+
+run time of each test (wall clock):
+veth-busypoll-rearm+flush-only                   13 s
+veth-busypoll-rearm+helper                       13 s
+veth-busypoll-rearm+nobarrier                    14 s
+veth-busypoll-rearm-producer+flush-only         897 s
+veth-busypoll-rearm-producer+helper             894 s
+veth-busypoll-rearm-producer+nobarrier          886 s
+veth-handoff-ctrl-dep+wmb                         0 s
+veth-handoff-full+flush-only                      4 s
+veth-handoff-full+helper                          4 s
+veth-handoff-full+nobarrier                       4 s
+veth-handoff+nobarrier                            0 s
+veth-handoff-via-missed+nobarrier                 0 s
+veth-handoff-via-missed+wmb                       0 s
+veth-handoff+wmb                                  0 s
+veth-two-cycles+nobarrier                       601 s
+veth-two-cycles+wmb                             607 s
+veth-two-producers+nobarrier                     66 s
+veth-two-producers+wmb                           62 s
+veth-a64-llsc+dmb-ishst                           1 s
+veth-a64-llsc+nobarrier                           1 s
+veth-a64-lse-ctrl-dep+dmb-ishst                   1 s
+veth-a64-lse+dmb-ishst                            1 s
+veth-a64-lse+nobarrier                            1 s
+veth-a64-lse-via-missed+dmb-ishst                 0 s
+veth-a64-lse-via-missed+nobarrier                 1 s

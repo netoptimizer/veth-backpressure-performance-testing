@@ -1,7 +1,7 @@
 # veth Backpressure Performance Testing
 
 Tools for testing and measuring veth qdisc backpressure and BQL (Byte
-Queue Limits) behavior. This repository contains two independent test
+Queue Limits) behavior. This repository contains three independent test
 suites:
 
 ## [`reproducer/`](reproducer/README.md) -- Backpressure Reproducer
@@ -20,6 +20,16 @@ sustained UDP load, measures latency reduction, and detects DQL
 accounting bugs (kernel BUG_ON/Oops).
 
 See [`selftests/README.md`](selftests/README.md) for details.
+
+## [`memory-model/`](memory-model/README.md) -- Memory-Model Tests
+
+herd7 litmus tests for the `rx_notify_masked` race in veth's NAPI
+scheduling. They show that the old code can latch `rx_notify_masked`
+with NAPI idle, and that the `smp_wmb()` fix prevents it. The tests use
+the Linux-kernel memory model (LKMM) and herd7's arm64 model.
+
+See [`memory-model/README.md`](memory-model/README.md) for details and
+[`memory-model/RESULTS.md`](memory-model/RESULTS.md) for the results.
 
 ## Shared venv
 

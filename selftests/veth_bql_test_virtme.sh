@@ -9,6 +9,10 @@
 # Options:
 #   --verbose       Show kernel console (vng boot messages) in real time.
 #                   Useful for debugging kernel panics / BUG_ON crashes.
+#   --run IMAGE     Boot this kernel image instead of the tree's bzImage.
+#                   vng takes modules from the nearest lib/modules above
+#                   IMAGE, e.g. signed modules from 'make modules_install
+#                   INSTALL_MOD_PATH=vng-root' for MODULE_SIG_FORCE kernels.
 #   All other options are forwarded to veth_bql_test.sh (see --help there).
 #
 # Examples (run from kernel tree root):
@@ -19,16 +23,20 @@
 
 set -eu
 
-# Parse --verbose (consumed here for vng console, not forwarded).
+# Parse --verbose and --run (consumed here for vng, not forwarded).
 # --hist is forwarded to the inner test for bpftrace histogram output.
+ORIG_ARGS="$*"
 VERBOSE=""
+RUN_ARGS=()
 INNER_ARGS=()
-for arg in "$@"; do
-    if [ "$arg" = "--verbose" ]; then
-        VERBOSE="--verbose"
-    else
-        INNER_ARGS+=("$arg")
-    fi
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --verbose) VERBOSE="--verbose"; shift ;;
+    --run)
+        [ -f "${2:-}" ] || { echo "ERROR: --run needs a kernel image file" >&2; exit 1; }
+        RUN_ARGS=(--run "$(readlink -f "$2")"); shift 2 ;;
+    *) INNER_ARGS+=("$1"); shift ;;
+    esac
 done
 TEST_ARGS=""
 [ ${#INNER_ARGS[@]} -gt 0 ] && TEST_ARGS=$(printf '%q ' "${INNER_ARGS[@]}")
@@ -80,7 +88,7 @@ LOGFILE="$RESULTSDIR/veth_bql_test.log"
 CONSOLELOG="$RESULTSDIR/veth_bql_console.log"
 
 # Record command line for easy re-run (copy-paste ready)
-echo "cd $(pwd) && $0 $*" > "$RESULTSDIR/cmdline.sh"
+echo "cd $(pwd) && $0 $ORIG_ARGS" > "$RESULTSDIR/cmdline.sh"
 
 echo "Starting VM..."
 echo "  kernel tree: $(pwd)"
@@ -97,7 +105,7 @@ echo "(VM is booting, please wait ~30s)"
 SERIAL_CONSOLE="earlycon=uart8250,io,0x2f8,115200"
 SERIAL_CONSOLE+=" console=uart8250,io,0x2f8,115200"
 set +e
-vng $VERBOSE --cpus 4 --memory 2G \
+vng $VERBOSE "${RUN_ARGS[@]}" --cpus 4 --memory 2G \
     --rwdir "$REPO_ROOT" \
     --append "panic=5 loglevel=4 $SERIAL_CONSOLE" \
     --qemu-opts="-serial file:$CONSOLELOG" \

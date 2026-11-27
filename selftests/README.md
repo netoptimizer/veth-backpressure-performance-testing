@@ -58,11 +58,12 @@ cd /path/to/kernel-tree
 
 ## Options
 
-All options except `--verbose` are forwarded to `veth_bql_test.sh`:
+All options except `--verbose` and `--run` are forwarded to `veth_bql_test.sh`:
 
 | Option              | Default | Description                                              |
 |---------------------|---------|----------------------------------------------------------|
 | `--verbose`         | off     | Show kernel console output (useful for BUG_ON debugging) |
+| `--run IMAGE`       | (tree)  | Boot IMAGE instead of the tree's bzImage (wrapper only)  |
 | `--duration SEC`    | 30      | Test duration in seconds                                 |
 | `--nrules N`        | 13000   | iptables rules to slow consumer NAPI (0=disable)         |
 | `--qdisc NAME`      | sfq     | Qdisc to install on sender veth                          |
